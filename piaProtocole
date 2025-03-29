@@ -1,0 +1,268 @@
+function createAllDocuments() {
+  const TEMPLATE_AR_ID = "1LMNFvQZMK9Q3nLLdqaOFH7LmEe69BuTqSF1klILBYiw";
+  const TEMPLATE_PARCOURS_ID = "1Ab43-NXJNcQgEivSeU1XRsGxOsBlNNfhZNoNdMzFkPw";
+  
+  Logger.log("Début de l'exécution");
+  
+  var spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = spreadsheet.getSheetByName("Accueil");
+  Logger.log("Sheet actif : " + sheet.getName());
+  
+  var lastRow = sheet.getLastRow();
+  Logger.log("Dernière ligne : " + lastRow);
+  
+  var data = sheet.getRange(2, 1, lastRow - 1, 29).getValues();
+  Logger.log("Données récupérées : " + data.length + " lignes");
+  
+  const COLONNES = {
+    IDENTITE: 1,
+    PRENOM: 4,
+    CLASSE: 6,
+    TROUBLES: 10,
+    AR: 11,
+    AR_SPECIFIQUES: 12,
+    DATE_PROTOCOLE: 13,
+    CREATEUR: 14,
+    RESP1: 18,
+    MAIL_PARENT1: 19,
+    RESP2: 20,
+    MAIL_PARENT2: 21,
+    DOSSIER_ELEVE: 22,
+    LIEN_PROTOCOLE: 23,
+    LIEN_PARCOURS: 24,
+    SIGNATURE_ELEVE: 27,
+    STATUT_SUIVI: 28
+  };
+
+  for (var i = 0; i < data.length; i++) {
+    var row = data[i];
+    Logger.log("Traitement de la ligne " + (i + 2));
+    
+    if (!row[COLONNES.IDENTITE]) {
+      Logger.log("Ligne vide détectée, arrêt du traitement");
+      break;
+    }
+
+    var statutSuivi = row[COLONNES.STATUT_SUIVI];
+    Logger.log("Statut suivi : " + statutSuivi);
+    
+    // 1. Création du protocole AR si nécessaire
+    if (row[COLONNES.TROUBLES] && (statutSuivi === "A créer" || statutSuivi === "A recréer")) {
+      try {
+        Logger.log("Début création protocole AR - ligne " + (i + 2));
+        
+        var folderUrl = row[COLONNES.DOSSIER_ELEVE];
+        if (!folderUrl) {
+          throw new Error("Lien du dossier non trouvé dans la colonne W");
+        }
+        
+        var folderId = extractFolderIdFromUrl(folderUrl);
+        if (!folderId) {
+          throw new Error("Impossible d'extraire l'ID du dossier depuis l'URL: " + folderUrl);
+        }
+        
+        var targetFolder = DriveApp.getFolderById(folderId);
+        
+        var anneeActuelle = new Date().getFullYear();
+        var fileName = "Protocole AR de " + row[COLONNES.IDENTITE];
+        if (statutSuivi === "A recréer") {
+          fileName += " " + anneeActuelle;
+        }
+        
+        var templateDoc = DriveApp.getFileById(TEMPLATE_AR_ID);
+        var newFile = templateDoc.makeCopy(fileName, targetFolder);
+        
+        var protocolUrl = configureSharing(newFile);
+        
+        var doc = DocumentApp.openById(newFile.getId());
+        var body = doc.getBody();
+        Logger.log("Valeur dans COLONNES.TROUBLES: " + row[COLONNES.TROUBLES]);
+Logger.log("Balise à remplacer: <<Trouble(s)>>");
+        var replacements = {
+          "<<Identité>>": row[COLONNES.IDENTITE] || "",
+          "<<dateCréationProtocole>>": formatDate(row[COLONNES.DATE_PROTOCOLE]),
+          "<<créateurProtocole>>": row[COLONNES.CREATEUR] || "",
+          "<<classe>>": row[COLONNES.CLASSE] || "",
+          "<<IdentitéResponsable1>>": row[COLONNES.RESP1] || "",
+          "<<mail parent 1>>": row[COLONNES.MAIL_PARENT1] || "",
+          "<<IdentitéResponsable2>>": row[COLONNES.RESP2] || "",
+          "<<mail parent 2>>": row[COLONNES.MAIL_PARENT2] || "",
+          "<<Trouble>>": row[COLONNES.TROUBLES] || "",
+          "<<AR>>": row[COLONNES.AR] || "",
+          "<<AR spécifiques>>": row[COLONNES.AR_SPECIFIQUES] || ""
+        };
+        
+        Object.keys(replacements).forEach(function(placeholder) {
+          body.replaceText(placeholder, replacements[placeholder]);
+        });
+        
+        doc.saveAndClose();
+        
+        // Mise à jour directe de l'URL dans la feuille
+        sheet.getRange(i + 2, COLONNES.LIEN_PROTOCOLE + 1).setValue(protocolUrl);
+        sheet.getRange(i + 2, 29).setValue("Déjà créé");
+        
+        envoyerMailParents(
+          row[COLONNES.PRENOM],
+          row[COLONNES.IDENTITE],
+          formatDate(row[COLONNES.DATE_PROTOCOLE]),
+          protocolUrl,
+          row[COLONNES.MAIL_PARENT1],
+          row[COLONNES.MAIL_PARENT2]
+        );
+        
+      } catch (error) {
+        Logger.log("ERREUR création protocole - Message : " + error.message);
+        Logger.log("ERREUR création protocole - Stack : " + error.stack);
+      }
+    }
+
+    // 2. Création du Parcours élève si nécessaire
+    if (!row[COLONNES.LIEN_PARCOURS]) {
+      try {
+        Logger.log("Début création parcours élève - ligne " + (i + 2));
+        
+        var folderUrl = row[COLONNES.DOSSIER_ELEVE];
+        if (!folderUrl) {
+          throw new Error("Lien du dossier non trouvé dans la colonne W");
+        }
+        
+        var folderId = extractFolderIdFromUrl(folderUrl);
+        if (!folderId) {
+          throw new Error("Impossible d'extraire l'ID du dossier depuis l'URL: " + folderUrl);
+        }
+        
+        var targetFolder = DriveApp.getFolderById(folderId);
+        
+        var templateParcours = SpreadsheetApp.openById(TEMPLATE_PARCOURS_ID);
+        var fileNameParcours = row[COLONNES.IDENTITE] + " - parcours de l'élève";
+        
+        var newParcours = templateParcours.copy(fileNameParcours);
+        var file = DriveApp.getFileById(newParcours.getId());
+        file.moveTo(targetFolder);
+        
+        var parcoursUrl = configureSharing(file);
+        
+        // Mise à jour directe de l'URL dans la feuille
+        sheet.getRange(i + 2, COLONNES.LIEN_PARCOURS + 1).setValue(parcoursUrl);
+        
+      } catch (error) {
+        Logger.log("ERREUR création parcours - Message : " + error.message);
+        Logger.log("ERREUR création parcours - Stack : " + error.stack);
+      }
+    }
+  }
+  Logger.log("Fin de l'exécution");
+}
+
+function configureSharing(file) {
+  Logger.log("Début configuration partage alternative");
+  try {
+    Logger.log("Type du fichier : " + file.getMimeType());
+    Logger.log("ID du fichier : " + file.getId());
+    
+    try {
+      file.setSharing(DriveApp.Access.ANYONE, DriveApp.Permission.VIEW);
+      Logger.log("Permissions configurées via DriveApp");
+    } catch (driveAppError) {
+      Logger.log("Erreur lors de la configuration du partage: " + driveAppError);
+    }
+    
+    var url = file.getUrl();
+    Logger.log("URL obtenue : " + url);
+    
+    // On nettoie l'URL pour enlever les paramètres
+    url = url.split('?')[0];
+    
+    // Si c'est un document Google, on force le mode vue
+    if (file.getMimeType().includes('google-apps')) {
+      url = url.replace(/\/edit$/, '/view');
+    }
+    
+    return url;
+  } catch (e) {
+    Logger.log("ERREUR générale: " + e.message);
+    Logger.log("Stack trace : " + e.stack);
+    return file.getUrl().split('?')[0];
+  }
+}
+
+
+// Les autres fonctions restent inchangées
+function envoyerMailParents(prenom, identite, dateProtocole, lienProtocole, mailParent1, mailParent2) {
+  if (!mailParent1 && !mailParent2) {
+    Logger.log("Aucune adresse mail de parent trouvée");
+    return;
+  }
+
+  var destinataires = [];
+  if (mailParent1) destinataires.push(mailParent1);
+  if (mailParent2) destinataires.push(mailParent2);
+  
+  var sujet = "Rencontre de " + identite;
+  
+  var corps = "Chers Parents,\n\n" +
+              "Nous avons rencontré à la date du " + dateProtocole + " votre enfant, " + prenom + " afin d'établir un suivi. " +
+              "Vous trouverez via ce lien\n\n" +
+              lienProtocole + "\n\n" +
+              "le protocole que nous observerons à l'avenir.\n\n" +
+              "Bien à vous,\n\n" +
+              "L'équipe PIA";
+              
+  GmailApp.sendEmail(
+    destinataires.join(","),
+    sujet,
+    corps
+  );
+  
+  Logger.log("Mail envoyé aux parents: " + destinataires.join(", "));
+}
+
+function extractFolderIdFromUrl(url) {
+  if (!url) return null;
+  
+  var patterns = [
+    /folders\/([a-zA-Z0-9-_]+)/,
+    /id=([a-zA-Z0-9-_]+)/,
+    /d\/([a-zA-Z0-9-_]+)/
+  ];
+  
+  for (var pattern of patterns) {
+    var matches = url.match(pattern);
+    if (matches && matches[1]) {
+      return matches[1];
+    }
+  }
+  
+  return null;
+}
+
+function formatDate(date) {
+  if (!date) return "";
+  if (typeof date === "string") return date;
+  
+  return Utilities.formatDate(date, "Europe/Paris", "dd/MM/yyyy");
+}
+
+/**
+ * Fonction pour installer le déclencheur onChange
+ */
+function installerDeclencheurOnChange() {
+  // Supprimer uniquement le déclencheur onChange existant
+  const triggers = ScriptApp.getProjectTriggers();
+  for (const trigger of triggers) {
+    if (trigger.getHandlerFunction() === "createAllDocuments") {
+      ScriptApp.deleteTrigger(trigger);
+    }
+  }
+  
+  // Créer le nouveau déclencheur onChange
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  ScriptApp.newTrigger("createAllDocuments")
+    .forSpreadsheet(ss)
+    .onChange()
+    .create();
+    
+  Logger.log("Déclencheur onChange installé avec succès");
+}
+
